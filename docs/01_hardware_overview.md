@@ -200,24 +200,89 @@ Khối bảo mật Secure Enclave Subsystem (SESS) đóng vai trò là Người 
 
 ### 3.1 Luồng dữ liệu cơ bản trên ALFI MCU
 
+Bus AXI chính: Giải thích về giao thức bus AXI4 hiệu suất cao với độ rộng 64-bit, hoạt động ở tần số 400 MHz, cho phép kết nối song song các cổng master (CPU, DMA) và slave (bộ nhớ, ngoại vi).
+
+Bảo mật và Tường lửa (Firewalls): Luồng dữ liệu khi truyền qua bus được giám sát chặt chẽ bởi các Tường lửa. Các tường lửa này thực hiện lọc giao dịch (transaction gating) dựa trên Master ID, trạng thái bảo mật TrustZone, và đảm nhiệm việc dịch địa chỉ (address translation) để cung cấp cho mỗi hệ thống con một không gian địa chỉ toàn cục (global address map) phù hợp
+.
+
+<p align="center">
+  <img src="../images/data-flow.png" width="600" alt="Sơ đồ khối">
+  <br>
+  <em>Hình 3.1: Tổng quan về đường đi dữ liệu trên E7</em>
+</p>
+
+Trong đường truyền dữ liệu của MCU E& một cơ chế xuất hiện xuyên suốt và rất tốt cho việc xử lý real-time và ít tốn năng lượng là DMA (Direct Memory Access). DMA là cơ chế cho phép ngoại vi hoặc bộ điều khiển DMA tự truyền dữ liệu trực tiếp với bộ nhớ (RAM) mà không cần CPU xử lý từng byte. Giải tải CPU và quan trọng nhất là không tốn thời gian cho việc ghi dữ liệu vào bộ nhớ.
+
+### 3.2 Luồng dữ liệu xử lý trên MCU E7
+
+Các tác vụ được xử lý riêng biệt và các subsystems giao tiếp với nhau thông MHUs và cơ chế ngắt (IRQs). Phía dưới là hình ảnh mô tả về quy trình xử lý trên E7 và mô tả chi tiết từng quá trình. Về cơ bản dữ liệu sẽ được xử lý tuần tự theo các bước dưới, tuy nhiên việc dữ liệu được xử lý bởi RTSS nào HP hay HE thì phụ thuộc vào người lập trình và kiến trúc phần mềm nạp xuống. Tóm lại, phần cứng cung cấp các công cụ (TCM độc lập, Mailbox, bộ quản lý năng lượng), nhưng chính bản đồ bộ nhớ và cấu trúc code của bạn mới là thứ "chỉ định" lõi nào được phép làm gì.
+
+<p align="center">
+  <img src="../images/data-flow-execution.png" width="600" alt="Sơ đồ khối">
+  <br>
+  <em>Hình 3.2: Luồng dữ liệu xử lý trên E7</em>
+</p>
+
+
+
+1. **Thu thập dữ liệu (Data Acquisition)**
+
+- Thiết bị ngoại vi (như Camera, Micro) thu thập dữ liệu thô.  
+- Dữ liệu này được đẩy thẳng vào bộ nhớ TCM / SRAM thông qua kênh truyền DMA (Direct Memory Access) để CPU không phải can thiệp, giúp tiết kiệm tài nguyên. 
+- Nếu dữ liệu nhỏ vào được TCM sẽ ưu tiên vào TCM nếu không sẽ vào SRAM
+2. **Tiền xử lý (Preprocessing)**
+
+- Vi điều khiển Cortex M55 đọc dữ liệu thô từ TCM/SRAM để thực hiện các tác vụ tiền xử lý (ví dụ: resize ảnh, lọc nhiễu âm thanh).
+- Xử lý xong, Cortex M55 lưu dữ liệu đã "sạch" trở lại vào TCM / SRAM để chuẩn bị cho AI.
+- Sau đó nó sử tín hiệu cho NPU dạng "Dữ liệu nằm ở X, xử lý xong lưu dữ liệu vào lại Y" trên TCM/SRAM
+3. **Xử lý AI / Suy luận (AI Processing)**
+
+- Đây là trái tim của hệ thống. Bộ vi xử lý AI chuyên dụng NPU - Ethos U55 sẽ làm 2 việc cùng lúc:
+- Lấy dữ liệu đầu vào (đã tiền xử lý) từ TCM / SRAM.
+- Kéo các thông số/trọng số của mô hình AI từ bộ nhớ MRAM.
+- NPU thực hiện tính toán và ghi kết quả dự đoán (output) ngược trở lại TCM / SRAM.
+
+4. **Hậu xử lý (Post-processing)**
+
+- Cortex M55 lại tiếp tục vào việc. Nó đọc kết quả AI từ TCM/SRAM để dịch ra thông tin dễ hiểu (ví dụ: tính toán tọa độ khung hình, quyết định xem giọng nói đó là lệnh gì).  
+5. **Xuất kết quả & Điều khiển (Output / Control)**  
+Tùy vào độ phức tạp của tác vụ, dữ liệu sau hậu xử lý có thể đi theo 2 hướng:
+    - Hướng 1 (Tốc độ cao / Đơn giản): Cortex M55 trực tiếp ra lệnh cho thiết bị Ngoại vi (ví dụ: bật đèn, đóng/mở relay)
+    - Hướng 2 (Phức tạp / Đòi hỏi HĐH): Cortex M55 đẩy dữ liệu qua một SRAM chung để báo cáo cho vi xử lý mạnh hơn là Cortex A32 (thường chạy Linux). Cortex A32 sẽ lo các việc nặng như hiển thị UI, đẩy dữ liệu lên cloud, rồi mới điều khiển Ngoại vi.
 ---
 
 ## ⚡ 4. Hardware Showcase: DevKit vs AppKit
 
-Dòng Ensemble E7 hiện có hai biến thể phần cứng phổ biến cho nhà phát triển:
+Dòng Ensemble E7 hiện có hai biến thể phần cứng phổ biến cho nhà phát triển:  
+ [Tài liệu tham khảo User Guide cho DevKit](https://www.bing.com/ck/a?!&&p=0f1e79fc1e4bde63991911496e1deb26920984526b9416a575c9dee5c5086fd0JmltdHM9MTc3NDgyODgwMA&ptn=3&ver=2&hsh=4&fclid=02dea0dd-a511-68d8-1534-b632a4fa699e&psq=Alif+Ensemble+DevKit+User+Guide&u=a1aHR0cHM6Ly9hbGlmc2VtaS5jb20vZG93bmxvYWQvQVVHRDAwMTA)
 
 ### 🔴 Alif Ensemble E7 DevKit (Full-featured)
 
-Đây là phiên bản đầy đủ nhất, phù hợp cho giai đoạn nghiên cứu và phát triển (R&D).
+<p align="left">
+  <img src="../images/devkit-e7.jpg" alt="image" width="350" align="right">
+Đây là phiên bản đầy đủ nhất về mặt tín hiệu điện, được thiết kế chủ yếu cho các kỹ sư phần cứng và hệ thống trong giai đoạn R&D.  
 
-- **Đặc điểm:** Tích hợp màn hình, camera, nhiều cảm biến môi trường và đầy đủ các cổng giao tiếp JTAG/UART.
-- **Mục tiêu:** Thử nghiệm mọi tính năng của MCU trước khi thiết kế PCB tùy chỉnh.
+**Đặc điểm**: Thiết kế của DevKit tập trung vào việc đưa càng nhiều tín hiệu càng tốt ra các hàng rào cắm (headers) để tạo nguyên mẫu (prototyping), đo lường và kiểm tra hiệu năng. Nó có đầy đủ các cổng giao tiếp như JTAG, UART, Ethernet, khe cắm thẻ SD, USB, cùng các header chờ cho MIPI CSI/DSI, I2S, PDM Mics,.  
+
+**Tính năng đặc biệt**: DevKit sử dụng chip E7 "superset" (cấu hình cao nhất). Điểm thú vị là MCU trên bộ kit này có thể được cấu hình phần mềm để hoạt động mô phỏng như các dòng chip thấp hơn (ví dụ: E6, E5, E4, E3, E1). Nhờ đó, nhà phát triển có thể thử nghiệm mọi kịch bản chip trên cùng một bo mạch duy nhất.  
+
+**Mục tiêu**: Thử nghiệm chuyên sâu mọi chức năng của vi điều khiển, kiểm tra tín hiệu điện, gỡ lỗi (debug) cấu hình hệ thống trước khi thiết kế PCB tùy chỉnh.
+</p>
+
 
 ### 🔵 Alif Ensemble E7 AppKit (Targeted)
 
-Phiên bản nhỏ gọn, tối ưu hóa cho một số ứng dụng cụ thể.
+<p align="left">
+  <img src="../images/appkit-e7.jpg" alt="image" width="350" align="right">
+Đây là phiên bản tối ưu hóa cho việc phát triển phần mềm và xây dựng sản phẩm mẫu nhanh chóng, đặc biệt tập trung vào các ứng dụng AI/Machine Learning tại biên (Endpoint ML).
 
-- **Đặc điểm:** Lược bỏ một số ngoại vi không cần thiết để giảm diện tích, tập trung vào tính cơ động.
-- **Mục tiêu:** Triển khai nhanh các dự án IoT hoặc AI quy mô nhỏ.
+**Đặc điểm**: Không giống như DevKit yêu cầu cắm thêm module, AppKit được tích hợp sẵn (on-board) các phần cứng ngoại vi quan trọng bao gồm: một camera/cảm biến hình ảnh giao tiếp MIPI-CSI (hỗ trợ quay video hoặc chụp ảnh), một màn hình LCD màu chuẩn WVGA, 4 microphone thu âm và cảm biến chuyển động IMU.  
+
+**Hỗ trợ phần mềm**: Được đi kèm với bộ Software SDK hỗ trợ đầy đủ driver cho mọi ngoại vi trên bo mạch, giúp lập trình viên bỏ qua bước "build phần cứng" mà bắt tay ngay vào viết ứng dụng.  
+
+**Mục tiêu**: Trải nghiệm ngay sự gia tăng hiệu năng của NPU Ethos-U55, dùng để triển khai nhanh các mô hình AI nhận diện hình ảnh, xử lý giọng nói, hoặc giao diện đồ họa HMI (Human-Machine Interface).
+</p>
+
+
 
 ---
